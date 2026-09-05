@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Pebble Index daily-note watcher every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
