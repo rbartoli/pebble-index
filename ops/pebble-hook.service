@@ -1,0 +1,14 @@
+[Unit]
+Description=Pebble Index ring webhook -> OpenClaw /hooks/agent bridge
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/pebble-index/hook.env
+# Interpreter on purpose: the project directory is Resilio-synced and the
+# executable bit does not survive every resync.
+ExecStart=/usr/bin/python3 %h/Sync/Projects/ai/pebble-index/pebble_hook.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
