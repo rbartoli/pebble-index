@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge Pebble Index 01 ring webhooks to OpenClaw's `POST /hooks/agent`.
+"""Bridge Pebble Index 01 ring webhooks to OpenClaw's `POST /hooks/ring` mapping.
 
 The Pebble app can POST each recording to a webhook, but as multipart/form-data
 (`transcription`, `recordedAt`, `client`, optional `audio`) with the gesture in an
@@ -10,15 +10,17 @@ The Pebble app can POST each recording to a webhook, but as multipart/form-data
   1. checks the app's `Authorization: Bearer` header against PEBBLE_HOOK_TOKEN
   2. keeps only `double-click-hold` recordings (and `test-event`, so the app's
      "Send test event" button proves the whole chain); other gestures get 204
-  3. forwards the transcript as an isolated agent turn, delivered to Telegram
+  3. forwards the transcript to the gateway's `ring` hook mapping, which runs it in
+     the Telegram DM session (persistent, so follow-ups keep context and a spoken
+     answer lands next to the daily question it answers) and replies on Telegram
 
 Env (see ops/pebble-hook.service, secrets in ~/.config/pebble-index/hook.env):
   PEBBLE_HOOK_TOKEN    bearer the Pebble app sends (required)
   OPENCLAW_HOOK_TOKEN  OpenClaw `hooks.token` (required)
-  OPENCLAW_HOOK_URL    default http://127.0.0.1:18789/hooks/agent
-  TELEGRAM_TO          Telegram chat id to deliver the reply to (required)
-  OPENCLAW_AGENT_ID    default main
+  OPENCLAW_HOOK_URL    default http://127.0.0.1:18789/hooks/ring
   PEBBLE_HOOK_BIND     default 127.0.0.1:8444
+
+Agent, session and Telegram chat live in the gateway's `hooks.mappings` entry (README).
 
 Stdlib only, Python 3.11+ (no `cgi`; multipart is parsed with `email`).
 """
@@ -61,25 +63,22 @@ def parse_multipart(content_type: str, body: bytes) -> dict[str, str]:
     return fields
 
 
-def build_agent_payload(transcription: str, trigger: str, env: dict[str, str]) -> dict:
+def build_agent_payload(transcription: str, trigger: str) -> dict:
+    # ~/.openclaw/bin/recent-replies.py finds ring messages by "from the Pebble Index ring"
+    # and skips the test prefix, so the daily question can count spoken answers.
     prefix = "[Pebble test event] " if trigger == "test-event" else ""
     return {
         "message": (
-            f"{prefix}Voice question from the Pebble Index ring (double-click-hold). "
-            "Answer briefly, as a Telegram message:\n\n" + transcription.strip()
+            f"{prefix}Voice message from the Pebble Index ring (double-click-hold): a question, "
+            "or an answer to today's daily question. Reply briefly, as a Telegram message:\n\n"
+            + transcription.strip()
         ),
-        "name": "Pebble Index",
-        "agentId": env.get("OPENCLAW_AGENT_ID", "main"),
-        "sessionMode": "isolated",
-        "deliver": True,
-        "channel": "telegram",
-        "to": env["TELEGRAM_TO"],
     }
 
 
 def forward(payload: dict, idempotency_key: str, env: dict[str, str]) -> tuple[int, str]:
     req = urllib.request.Request(
-        env.get("OPENCLAW_HOOK_URL", "http://127.0.0.1:18789/hooks/agent"),
+        env.get("OPENCLAW_HOOK_URL", "http://127.0.0.1:18789/hooks/ring"),
         data=json.dumps(payload).encode(),
         method="POST",
         headers={
@@ -143,14 +142,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         key = self.headers.get("X-Index-Delivery") or f"pebble-{fields.get('recordedAt', '')}"
-        code, text = forward(build_agent_payload(transcription, trigger, self.env), key, self.env)
+        code, text = forward(build_agent_payload(transcription, trigger), key, self.env)
         log(f"trigger={trigger} chars={len(transcription)} openclaw={code} {text[:200]!r}")
         self._reply(200 if code == 200 else 502, text + "\n")
 
 
 def main() -> int:
     env = dict(os.environ)
-    missing = [k for k in ("PEBBLE_HOOK_TOKEN", "OPENCLAW_HOOK_TOKEN", "TELEGRAM_TO") if not env.get(k)]
+    missing = [k for k in ("PEBBLE_HOOK_TOKEN", "OPENCLAW_HOOK_TOKEN") if not env.get(k)]
     if missing:
         log(f"missing env: {', '.join(missing)}")
         return 2

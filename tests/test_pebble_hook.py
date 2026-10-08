@@ -35,14 +35,18 @@ class ParseMultipart(unittest.TestCase):
 
 
 class AgentPayload(unittest.TestCase):
-    def test_delivers_to_telegram(self):
-        p = build_agent_payload("  hello ", "double-click-hold", {"TELEGRAM_TO": "123"})
-        self.assertEqual((p["channel"], p["to"], p["deliver"], p["agentId"]), ("telegram", "123", True, "main"))
+    def test_message_only_routing_is_gateway_side(self):
+        p = build_agent_payload("  hello ", "double-click-hold")
+        self.assertEqual(set(p), {"message"})
         self.assertTrue(p["message"].endswith("hello"))
         self.assertNotIn("test event", p["message"])
 
+    def test_marker_recent_replies_keys_on(self):
+        p = build_agent_payload("hello", "double-click-hold")
+        self.assertIn("from the Pebble Index ring", p["message"])
+
     def test_test_event_is_marked(self):
-        p = build_agent_payload("x", "test-event", {"TELEGRAM_TO": "1"})
+        p = build_agent_payload("x", "test-event")
         self.assertTrue(p["message"].startswith("[Pebble test event]"))
 
 

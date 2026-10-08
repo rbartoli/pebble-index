@@ -40,18 +40,20 @@ State: `~/.local/state/pebble-index/processed.json`.
 "Ask the vault from the ring, answer on Telegram." The Pebble app can POST each recording to a
 webhook, but as multipart/form-data with the gesture in an `X-Index-Trigger` header
 (spec: `experimental/.../indexwebhook/INDEX_WEBHOOK_API.md` in `coredevices/mobileapp`).
-OpenClaw's `POST /hooks/agent` only takes JSON, so this small server bridges the two:
+OpenClaw's hook ingress only takes JSON, so this small server bridges the two:
 
 1. checks the app's `Authorization: Bearer <PEBBLE_HOOK_TOKEN>` header
 2. forwards only `double-click-hold` (and the app's `test-event`); other gestures get 204
-3. submits the transcript as an isolated agent turn delivered to Telegram (`channel`/`to`)
+3. posts the transcript to the gateway's `ring` mapping (`POST /hooks/ring`), which runs it in
+   the Telegram DM session and replies there. The session is persistent, so a follow-up keeps
+   its context and a spoken answer to the daily question lands right after the question.
 
 Stdlib only, Python 3.11+ (multipart parsed with `email`, no `cgi`).
 
 ### Install on the M720q
 
 ```sh
-# secrets (mode 600): PEBBLE_HOOK_TOKEN, OPENCLAW_HOOK_TOKEN (= openclaw.json hooks.token), TELEGRAM_TO
+# secrets (mode 600): PEBBLE_HOOK_TOKEN, OPENCLAW_HOOK_TOKEN (= openclaw.json hooks.token)
 $EDITOR ~/.config/pebble-index/hook.env
 cp ops/pebble-hook.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -60,8 +62,21 @@ tailscale serve --bg --https=8444 http://127.0.0.1:8444     # tailnet only, no F
 journalctl --user -u pebble-hook -f
 ```
 
-OpenClaw side (`~/.openclaw/openclaw.json`): `hooks: { enabled: true, token, path: "/hooks",
-allowedAgentIds: ["main"], allowRequestSessionKey: false }`, then `openclaw gateway restart`.
+OpenClaw side (`~/.openclaw/openclaw.json`), hot-reloaded. The session key is static and lives in
+the mapping, so callers still can't pick sessions (`allowRequestSessionKey: false`):
+
+```json5
+hooks: {
+  enabled: true, token, path: "/hooks", allowedAgentIds: ["main"], allowRequestSessionKey: false,
+  allowedSessionKeyPrefixes: ["hook:", "agent:main:telegram:direct:<chat id>"],
+  mappings: [{
+    id: "pebble-ring", match: { path: "ring" }, action: "agent", agentId: "main",
+    name: "Pebble Index", messageTemplate: "{{message}}",
+    sessionKey: "agent:main:telegram:direct:<chat id>", sessionMode: "persistent",
+    deliver: true, channel: "telegram", to: "<chat id>",
+  }],
+}
+```
 
 Pebble app → Index 01 Settings → Webhook → **Double click & hold**: URL
 `https://<host>.<tailnet>.ts.net:8444/index`, What to send **Transcription**, header
