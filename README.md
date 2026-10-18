@@ -20,11 +20,13 @@ Stdlib only, Python 3.10+.
 
 ```sh
 python3 index_to_daily.py --dry-run          # show what would happen
-python3 index_to_daily.py                    # VAULT defaults to ~/Sync/Obsidian/RB
+VAULT=~/Obsidian python3 index_to_daily.py   # VAULT (or --vault) is required
 python3 -m unittest discover -s tests -v     # tests
 ```
 
 ### Install on the M720q
+
+Set `VAULT` and the checkout path in `ops/index-to-daily.service` first.
 
 ```sh
 cp ops/index-to-daily.{service,timer} ~/.config/systemd/user/
@@ -53,7 +55,8 @@ Stdlib only, Python 3.11+ (multipart parsed with `email`, no `cgi`).
 ### Install on the M720q
 
 ```sh
-# secrets (mode 600): PEBBLE_HOOK_TOKEN, OPENCLAW_HOOK_TOKEN (= openclaw.json hooks.token)
+# secrets (mode 600): PEBBLE_HOOK_TOKEN, OPENCLAW_HOOK_TOKEN (= openclaw.json hooks.token),
+# optional PEBBLE_HOOK_SECRET (request signing, see below)
 $EDITOR ~/.config/pebble-index/hook.env
 cp ops/pebble-hook.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -81,3 +84,17 @@ hooks: {
 Pebble app → Index 01 Settings → Webhook → **Double click & hold**: URL
 `https://<host>.<tailnet>.ts.net:8444/index`, What to send **Transcription**, header
 `Authorization` = `Bearer <PEBBLE_HOOK_TOKEN>`. "Send test event" should produce a Telegram reply.
+
+### Security
+
+Keep the bridge tailnet-only: never expose it with `tailscale funnel`. The bearer token is all
+that stands between the webhook and an agent that can run commands.
+
+For replay protection, turn on request signing for the **Double click & hold** gesture in the
+app with a random secret (`openssl rand -hex 32`) and set the same value as
+`PEBBLE_HOOK_SECRET`. The bridge then refuses unsigned requests, timestamps more than five
+minutes off, and repeated delivery IDs, as the app's webhook spec recommends.
+
+## License
+
+MIT

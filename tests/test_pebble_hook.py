@@ -1,6 +1,8 @@
+import hashlib
+import hmac
 import unittest
 
-from pebble_hook import build_agent_payload, parse_multipart
+from pebble_hook import build_agent_payload, check_signature, parse_multipart
 
 
 def multipart(fields: dict[str, str], boundary: str = "b0undary") -> tuple[str, bytes]:
@@ -48,6 +50,47 @@ class AgentPayload(unittest.TestCase):
     def test_test_event_is_marked(self):
         p = build_agent_payload("x", "test-event")
         self.assertTrue(p["message"].startswith("[Pebble test event]"))
+
+
+SECRET = b"s3cret"
+NOW = 1_800_000_000
+
+
+def signed(body: bytes, ts: int, delivery: str = "d1", secret: bytes = SECRET) -> dict[str, str]:
+    prefix = f"v1\n{ts}\n{delivery}\ndouble-click-hold\n0\n".encode()
+    return {
+        "X-Index-Webhook-Version": "1",
+        "X-Index-Timestamp": str(ts),
+        "X-Index-Delivery": delivery,
+        "X-Index-Trigger": "double-click-hold",
+        "X-Index-Signature": hmac.new(secret, prefix + body, hashlib.sha256).hexdigest(),
+    }
+
+
+class Signature(unittest.TestCase):
+    def test_valid_request_accepted_once(self):
+        seen: dict[str, float] = {}
+        h = signed(b"body", NOW)
+        self.assertIsNone(check_signature(h, b"body", SECRET, seen, NOW))
+        self.assertEqual(check_signature(h, b"body", SECRET, seen, NOW + 1), "replayed delivery")
+
+    def test_tampered_body_or_wrong_secret_refused(self):
+        h = signed(b"body", NOW)
+        self.assertEqual(check_signature(h, b"bodx", SECRET, {}, NOW), "bad signature")
+        self.assertEqual(check_signature(h, b"body", b"other", {}, NOW), "bad signature")
+
+    def test_stale_or_malformed_refused(self):
+        self.assertEqual(check_signature(signed(b"b", NOW - 301), b"b", SECRET, {}, NOW), "stale timestamp")
+        h = signed(b"b", NOW)
+        h["X-Index-Timestamp"] = "soon"
+        self.assertEqual(check_signature(h, b"b", SECRET, {}, NOW), "bad timestamp")
+        h = signed(b"b", NOW)
+        h["X-Index-Webhook-Version"] = "2"
+        self.assertEqual(check_signature(h, b"b", SECRET, {}, NOW), "unsupported webhook version")
+
+    def test_old_deliveries_expire_from_the_cache(self):
+        seen = {"d1": NOW - 301.0}
+        self.assertIsNone(check_signature(signed(b"b", NOW), b"b", SECRET, seen, NOW))
 
 
 if __name__ == "__main__":

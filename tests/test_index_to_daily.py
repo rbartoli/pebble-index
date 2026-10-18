@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -112,6 +113,13 @@ class Process(unittest.TestCase):
         self.capture("2026-09-03 1059.md")
         m.process(self.vault, self.state)
         self.assertTrue((self.vault / ".trash" / "2026-09-03 1059 (trash 2).md").exists())
+
+
+class Main(unittest.TestCase):
+    def test_vault_is_required(self):
+        env = {k: v for k, v in os.environ.items() if k != "VAULT"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(m.main(["--state", "/nonexistent/state.json"]), 2)
 
 
 if __name__ == "__main__":
