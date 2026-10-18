@@ -163,8 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
         "--vault",
-        default=os.environ.get("VAULT", "~/Sync/Obsidian/RB"),
-        help="vault root (default $VAULT or ~/Sync/Obsidian/RB)",
+        default=os.environ.get("VAULT"),
+        help="vault root (default $VAULT)",
     )
     ap.add_argument(
         "--state",
@@ -176,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="log what would happen, change nothing")
     args = ap.parse_args(argv)
 
+    if not args.vault:
+        log("error: set --vault or $VAULT to your vault root")
+        return 2
     vault = Path(os.path.expanduser(args.vault))
     if not (vault / "Voice notes").is_dir():
         log(f"error: {vault / 'Voice notes'} not found")

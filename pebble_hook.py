@@ -17,6 +17,8 @@ The Pebble app can POST each recording to a webhook, but as multipart/form-data
 Env (see ops/pebble-hook.service, secrets in ~/.config/pebble-index/hook.env):
   PEBBLE_HOOK_TOKEN    bearer the Pebble app sends (required)
   OPENCLAW_HOOK_TOKEN  OpenClaw `hooks.token` (required)
+  PEBBLE_HOOK_SECRET   the app's request-signing secret (optional; when set, unsigned,
+                       stale or replayed requests are refused)
   OPENCLAW_HOOK_URL    default http://127.0.0.1:18789/hooks/ring
   PEBBLE_HOOK_BIND     default 127.0.0.1:8444
 
@@ -27,10 +29,13 @@ Stdlib only, Python 3.11+ (no `cgi`; multipart is parsed with `email`).
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from email.parser import BytesParser
@@ -40,6 +45,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 FORWARDED_TRIGGERS = {"double-click-hold", "test-event"}
 MAX_BODY = 8 * 1024 * 1024  # audio would be bigger; we only ask for transcription
 AGENT_TIMEOUT = 20  # OpenClaw admission can wait up to 15 s
+SIGNATURE_WINDOW = 300  # seconds; the window the Pebble webhook spec recommends
+
+_seen_lock = threading.Lock()
+_seen_deliveries: dict[str, float] = {}  # delivery ID -> time accepted
 
 
 def log(msg: str) -> None:
@@ -61,6 +70,40 @@ def parse_multipart(content_type: str, body: bytes) -> dict[str, str]:
         payload = part.get_payload(decode=True) or b""
         fields[str(name)] = payload.decode("utf-8", "replace")
     return fields
+
+
+def check_signature(headers, body: bytes, secret: bytes, seen: dict[str, float], now: float) -> str | None:
+    """Verify the app's HMAC-SHA256 request signature (INDEX_WEBHOOK_API.md, "Signed requests").
+
+    Returns None for an authentic, fresh, first-seen request, else the reason to refuse it.
+    `seen` maps accepted delivery IDs to when they were accepted, so replays are refused.
+    """
+    if not headers.get("X-Index-Signature"):
+        return "unsigned request"
+    version = headers.get("X-Index-Webhook-Version", "")
+    if version != "1":
+        return "unsupported webhook version"
+    ts_text = headers.get("X-Index-Timestamp", "")
+    try:
+        ts = int(ts_text)
+    except ValueError:
+        return "bad timestamp"
+    if abs(now - ts) > SIGNATURE_WINDOW:
+        return "stale timestamp"
+    delivery = headers.get("X-Index-Delivery", "")
+    trigger = headers.get("X-Index-Trigger", "")
+    is_test = headers.get("X-Index-Test") == "true"
+    signed = f"v{version}\n{ts_text}\n{delivery}\n{trigger}\n{1 if is_test else 0}\n".encode() + body
+    expected = hmac.new(secret, signed, hashlib.sha256).hexdigest().encode()
+    if not hmac.compare_digest(expected, headers.get("X-Index-Signature", "").encode("utf-8", "replace")):
+        return "bad signature"
+    for d, t in list(seen.items()):
+        if now - t > SIGNATURE_WINDOW:
+            del seen[d]
+    if delivery in seen:
+        return "replayed delivery"
+    seen[delivery] = now
+    return None
 
 
 def build_agent_payload(transcription: str, trigger: str) -> dict:
@@ -122,11 +165,23 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(401, "unauthorized\n")
             return
 
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
         if length <= 0 or length > MAX_BODY:
             self._reply(413, "bad length\n")
             return
         body = self.rfile.read(length)
+
+        secret = self.env.get("PEBBLE_HOOK_SECRET", "")
+        if secret:
+            with _seen_lock:
+                problem = check_signature(self.headers, body, secret.encode(), _seen_deliveries, time.time())
+            if problem:
+                log(f"401 {problem} from {self.client_address[0]}")
+                self._reply(401, "unauthorized\n")
+                return
 
         trigger = self.headers.get("X-Index-Trigger", "")
         if trigger not in FORWARDED_TRIGGERS:
@@ -144,7 +199,10 @@ class Handler(BaseHTTPRequestHandler):
         key = self.headers.get("X-Index-Delivery") or f"pebble-{fields.get('recordedAt', '')}"
         code, text = forward(build_agent_payload(transcription, trigger), key, self.env)
         log(f"trigger={trigger} chars={len(transcription)} openclaw={code} {text[:200]!r}")
-        self._reply(200 if code == 200 else 502, text + "\n")
+        if code == 200:
+            self._reply(200, "ok\n")
+        else:
+            self._reply(502, "agent unavailable\n")
 
 
 def main() -> int:
@@ -156,7 +214,7 @@ def main() -> int:
     host, _, port = env.get("PEBBLE_HOOK_BIND", "127.0.0.1:8444").rpartition(":")
     Handler.env = env
     server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), Handler)
-    log(f"pebble-hook listening on {host}:{port}")
+    log(f"pebble-hook listening on {host}:{port}, signing {'on' if env.get('PEBBLE_HOOK_SECRET') else 'off'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

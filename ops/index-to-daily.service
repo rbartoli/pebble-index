@@ -3,6 +3,8 @@ Description=Append Pebble Index ring captures to the Obsidian daily note
 
 [Service]
 Type=oneshot
+# Your vault root, and the path to your checkout in ExecStart.
+Environment=VAULT=%h/Obsidian
 # Invoked through the interpreter on purpose: the project directory is
 # Resilio-synced and the executable bit does not survive every resync.
 ExecStart=/usr/bin/python3 %h/Sync/Projects/ai/pebble-index/index_to_daily.py
