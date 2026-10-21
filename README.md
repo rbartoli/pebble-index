@@ -16,6 +16,11 @@ python3 -m unittest discover -s tests -v
 
 ## index_to_daily.py
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/pipeline-dark.png">
+  <img src="docs/pipeline-light.png" alt="What you say on the ring lands in your Obsidian daily note">
+</picture>
+
 The Pebble app's Obsidian integration writes one file per recording into
 `Voice notes/YYYY-MM-DD HHmm.md` (frontmatter `created:` and `tags: [index]`). It can't append
 to today's daily note, so this script does, on any computer that has your vault. Each run:
