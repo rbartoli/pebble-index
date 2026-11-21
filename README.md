@@ -3,8 +3,10 @@
 Two small scripts for the [Pebble Index 01](https://repebble.com/index), a ring you hold and talk into:
 
 - **`index_to_daily.py`** appends each recording to your Obsidian daily note.
-- **`pebble_hook.py`** lets you ask an [OpenClaw](https://github.com/openclaw/openclaw) agent a
-  question from the ring and get the answer on Telegram.
+- **`pebble_hook.py`** lets you ask an [OpenClaw](https://github.com/openclaw/openclaw) or
+  [Hermes Agent](https://github.com/NousResearch/hermes-agent) agent a question from the ring
+  and receive the answer through the gateway's configured chat platform.
+  OpenClaw remains the default; see [Hermes setup](docs/hermes.md) for the alternate backend.
 
 How and why I use them: [How I Capture Every Thought with a Ring](https://rblab.com/posts/how-i-capture-every-thought-with-a-ring/).
 
@@ -61,6 +63,10 @@ macOS or Linux, with cron (`crontab -e`):
 ```
 
 ## pebble_hook.py
+
+Set `PEBBLE_HOOK_BACKEND=hermes` to use [Hermes Agent](docs/hermes.md), including
+Telegram or Slack delivery configured in Hermes. The setup below describes the default
+OpenClaw backend, which is unchanged when `PEBBLE_HOOK_BACKEND` is unset.
 
 The Pebble app can POST each recording to a webhook, set per gesture, but sends multipart form
 data with the gesture in an `X-Index-Trigger` header

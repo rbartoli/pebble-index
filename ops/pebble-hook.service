@@ -1,5 +1,5 @@
 [Unit]
-Description=Pebble Index ring webhook -> OpenClaw /hooks/ring bridge
+Description=Pebble Index ring webhook -> agent gateway bridge
 After=network-online.target
 
 [Service]
