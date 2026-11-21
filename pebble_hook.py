@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
-"""Bridge Pebble Index 01 ring webhooks to OpenClaw's `POST /hooks/ring` mapping.
+"""Bridge Pebble Index 01 ring webhooks to OpenClaw or Hermes Agent.
 
-The Pebble app can POST each recording to a webhook, but as multipart/form-data
-(`transcription`, `recordedAt`, `client`, optional `audio`) with the gesture in an
-`X-Index-Trigger` header. OpenClaw's hook ingress only accepts JSON. This server
-(a systemd user service on the M720q, reached over the tailnet via
-`tailscale serve --https=8444`) sits between them:
+The Pebble app sends multipart/form-data with the gesture in X-Index-Trigger.
+This server authenticates the sender, selects double-click-hold (and test-event),
+and forwards a JSON message to the configured gateway over the tailnet.
 
-  1. checks the app's `Authorization: Bearer` header against PEBBLE_HOOK_TOKEN
-  2. keeps only `double-click-hold` recordings (and `test-event`, so the app's
-     "Send test event" button proves the whole chain); other gestures get 204
-  3. forwards the transcript to the gateway's `ring` hook mapping, which runs it in
-     the Telegram DM session (persistent, so follow-ups keep context and a spoken
-     answer lands next to the daily question it answers) and replies on Telegram
+Env (secrets in ~/.config/pebble-index/hook.env):
+  PEBBLE_HOOK_TOKEN     bearer the Pebble app sends (required)
+  PEBBLE_HOOK_BACKEND   openclaw (default) or hermes
+  PEBBLE_HOOK_SECRET    optional Pebble request-signing secret
+  PEBBLE_HOOK_BIND      default 127.0.0.1:8444
 
-Env (see ops/pebble-hook.service, secrets in ~/.config/pebble-index/hook.env):
-  PEBBLE_HOOK_TOKEN    bearer the Pebble app sends (required)
-  OPENCLAW_HOOK_TOKEN  OpenClaw `hooks.token` (required)
-  PEBBLE_HOOK_SECRET   the app's request-signing secret (optional; when set, unsigned,
-                       stale or replayed requests are refused)
-  OPENCLAW_HOOK_URL    default http://127.0.0.1:18789/hooks/ring
-  PEBBLE_HOOK_BIND     default 127.0.0.1:8444
+OpenClaw backend:
+  OPENCLAW_HOOK_TOKEN   OpenClaw hooks.token (required)
+  OPENCLAW_HOOK_URL     default http://127.0.0.1:18789/hooks/ring
 
-Agent, session and Telegram chat live in the gateway's `hooks.mappings` entry (README).
+Hermes backend:
+  HERMES_HOOK_SECRET   Hermes webhook route secret (required)
+  HERMES_HOOK_URL      default http://127.0.0.1:8644/webhooks/ring
 
-Stdlib only, Python 3.11+ (no `cgi`; multipart is parsed with `email`).
+Agent and delivery routing stay in the gateway configuration. Hermes requests
+use timestamp-bound HMAC-SHA256 V2 signatures; see docs/hermes.md for setup.
+Stdlib only, Python 3.11+ (multipart is parsed with email, not cgi).
 """
 
 from __future__ import annotations
@@ -106,10 +103,12 @@ def check_signature(headers, body: bytes, secret: bytes, seen: dict[str, float],
     return None
 
 
-def build_agent_payload(transcription: str, trigger: str) -> dict:
+def build_agent_payload(transcription: str, trigger: str, backend: str = "openclaw") -> dict:
+    prefix = "[Pebble test event] " if trigger == "test-event" else ""
+    if backend == "hermes":
+        return {"message": f"{prefix}Voice message from the Pebble Index ring:\n\n{transcription.strip()}"}
     # ~/.openclaw/bin/recent-replies.py finds ring messages by "from the Pebble Index ring"
     # and skips the test prefix, so the daily question can count spoken answers.
-    prefix = "[Pebble test event] " if trigger == "test-event" else ""
     return {
         "message": (
             f"{prefix}Voice message from the Pebble Index ring (double-click-hold): a question, "
@@ -120,16 +119,29 @@ def build_agent_payload(transcription: str, trigger: str) -> dict:
 
 
 def forward(payload: dict, idempotency_key: str, env: dict[str, str]) -> tuple[int, str]:
-    req = urllib.request.Request(
-        env.get("OPENCLAW_HOOK_URL", "http://127.0.0.1:18789/hooks/ring"),
-        data=json.dumps(payload).encode(),
-        method="POST",
-        headers={
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    backend = env.get("PEBBLE_HOOK_BACKEND", "openclaw")
+    if backend == "hermes":
+        url = env.get("HERMES_HOOK_URL", "http://127.0.0.1:8644/webhooks/ring")
+        timestamp = str(int(time.time()))
+        signature = hmac.new(
+            env["HERMES_HOOK_SECRET"].encode(), timestamp.encode() + b"." + body, hashlib.sha256
+        ).hexdigest()
+        headers.update({
+            "X-Webhook-Timestamp": timestamp,
+            "X-Webhook-Signature-V2": signature,
+            "X-Request-ID": idempotency_key,
+        })
+    elif backend == "openclaw":
+        url = env.get("OPENCLAW_HOOK_URL", "http://127.0.0.1:18789/hooks/ring")
+        headers.update({
             "Authorization": f"Bearer {env['OPENCLAW_HOOK_TOKEN']}",
-            "Content-Type": "application/json",
             "Idempotency-Key": idempotency_key,
-        },
-    )
+        })
+    else:
+        raise ValueError("PEBBLE_HOOK_BACKEND must be openclaw or hermes")
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=AGENT_TIMEOUT) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -197,9 +209,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         key = self.headers.get("X-Index-Delivery") or f"pebble-{fields.get('recordedAt', '')}"
-        code, text = forward(build_agent_payload(transcription, trigger), key, self.env)
-        log(f"trigger={trigger} chars={len(transcription)} openclaw={code} {text[:200]!r}")
-        if code == 200:
+        backend = self.env.get("PEBBLE_HOOK_BACKEND", "openclaw")
+        code, text = forward(build_agent_payload(transcription, trigger, backend), key, self.env)
+        log(f"trigger={trigger} chars={len(transcription)} {backend}={code} {text[:200]!r}")
+        if code == 200 or (backend == "hermes" and code == 202):
             self._reply(200, "ok\n")
         else:
             self._reply(502, "agent unavailable\n")
@@ -207,7 +220,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     env = dict(os.environ)
-    missing = [k for k in ("PEBBLE_HOOK_TOKEN", "OPENCLAW_HOOK_TOKEN") if not env.get(k)]
+    backend = env.get("PEBBLE_HOOK_BACKEND", "openclaw")
+    if backend not in {"openclaw", "hermes"}:
+        log("PEBBLE_HOOK_BACKEND must be openclaw or hermes")
+        return 2
+    credential = "HERMES_HOOK_SECRET" if backend == "hermes" else "OPENCLAW_HOOK_TOKEN"
+    missing = [k for k in ("PEBBLE_HOOK_TOKEN", credential) if not env.get(k)]
     if missing:
         log(f"missing env: {', '.join(missing)}")
         return 2
